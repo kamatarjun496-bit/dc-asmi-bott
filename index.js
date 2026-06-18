@@ -2,7 +2,6 @@ import 'dotenv/config';
 import { Client, GatewayIntentBits, Events } from 'discord.js';
 import { getAsmiReply } from './ai.js';
 
-// Validate required env vars
 const required = ['DISCORD_TOKEN', 'GROQ_API_KEY', 'SUPABASE_URL', 'SUPABASE_ANON_KEY', 'ALLOWED_CHANNEL_IDS'];
 for (const key of required) {
   if (!process.env[key]) {
@@ -20,11 +19,11 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.DirectMessages
+    GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.GuildMembers
   ]
 });
 
-// Track which users Asmi is currently replying to (prevents duplicate replies)
 const processingUsers = new Set();
 
 client.once(Events.ClientReady, (c) => {
@@ -33,42 +32,60 @@ client.once(Events.ClientReady, (c) => {
 });
 
 client.on(Events.MessageCreate, async (message) => {
-  // Ignore bots and self
   if (message.author.bot) return;
-
-  // Only respond in allowed channels
   if (!ALLOWED_CHANNELS.has(message.channelId)) return;
 
-  // Ignore empty messages
   const content = message.content?.trim();
   if (!content) return;
 
-  // Prevent duplicate processing for same user
   if (processingUsers.has(message.author.id)) return;
   processingUsers.add(message.author.id);
 
-  // Show typing indicator while processing
   let typingInterval;
   try {
     await message.channel.sendTyping();
     typingInterval = setInterval(() => message.channel.sendTyping(), 8000);
 
+    // Resolve mentioned users so Asmi knows who was pinged
+    const mentionedUsers = message.mentions.users.map(u => `@${u.username}`).join(', ');
+    const mentionedRoles = message.mentions.roles.map(r => `@${r.name}`).join(', ');
+
+    // Build context about mentions for Asmi
+    let messageContext = content;
+    if (mentionedUsers) {
+      messageContext += `\n[Note: This message mentions these users: ${mentionedUsers}]`;
+    }
+    if (mentionedRoles) {
+      messageContext += `\n[Note: This message mentions these roles: ${mentionedRoles}]`;
+    }
+
     const reply = await getAsmiReply(
       message.author.id,
       message.author.username,
-      content
+      messageContext
     );
 
     clearInterval(typingInterval);
 
-    // Discord has a 2000 char limit per message — split if needed
-    if (reply.length <= 2000) {
-      await message.reply({ content: reply, allowedMentions: { repliedUser: false } });
+    // Convert any @username mentions in Asmi's reply to proper Discord pings
+    const resolvedReply = await resolveUserMentions(reply, message.guild);
+
+    if (resolvedReply.length <= 2000) {
+      await message.reply({ 
+        content: resolvedReply, 
+        allowedMentions: { parse: ['users', 'roles'] }
+      });
     } else {
-      const chunks = splitMessage(reply, 2000);
-      await message.reply({ content: chunks[0], allowedMentions: { repliedUser: false } });
+      const chunks = splitMessage(resolvedReply, 2000);
+      await message.reply({ 
+        content: chunks[0], 
+        allowedMentions: { parse: ['users', 'roles'] }
+      });
       for (const chunk of chunks.slice(1)) {
-        await message.channel.send(chunk);
+        await message.channel.send({ 
+          content: chunk,
+          allowedMentions: { parse: ['users', 'roles'] }
+        });
       }
     }
   } catch (err) {
@@ -76,12 +93,34 @@ client.on(Events.MessageCreate, async (message) => {
     console.error(`Error handling message from ${message.author.username}:`, err);
     await message.reply({ 
       content: "hmm something went wrong on my end... give me a second and try again? 😅",
-      allowedMentions: { repliedUser: false }
+      allowedMentions: { parse: [] }
     });
   } finally {
     processingUsers.delete(message.author.id);
   }
 });
+
+// Convert @username text to proper Discord <@userId> mentions
+async function resolveUserMentions(text, guild) {
+  if (!guild) return text;
+
+  const mentionPattern = /@([a-zA-Z0-9_.]+)/g;
+  const matches = [...text.matchAll(mentionPattern)];
+
+  let resolved = text;
+  for (const match of matches) {
+    const username = match[1].toLowerCase();
+    try {
+      const members = await guild.members.fetch({ query: username, limit: 1 });
+      const member = members.first();
+      if (member) {
+        resolved = resolved.replace(match[0], `<@${member.id}>`);
+      }
+    } catch {}
+  }
+
+  return resolved;
+}
 
 function splitMessage(text, maxLength) {
   const chunks = [];
