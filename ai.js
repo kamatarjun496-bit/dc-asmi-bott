@@ -12,16 +12,22 @@ import {
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
  
 function extractMemoryUpdate(text) {
-  const match = text.match(/<memory_update>\s*([\s\S]*?)\s*<\/memory_update>/);
-  if (!match) return { clean: text, update: null };
+  // Handle both <memory_update> tags and raw JSON at end of message
+  const tagMatch = text.match(/<memory_update>\s*([\s\S]*?)\s*<\/memory_update>/i);
+  const jsonMatch = text.match(/memory_update\s*(\{[\s\S]*?\})/i);
  
-  const clean = text.replace(/<memory_update>[\s\S]*?<\/memory_update>/g, '').trim();
-  try {
-    const update = JSON.parse(match[1]);
-    return { clean, update };
-  } catch {
-    return { clean, update: null };
+  let update = null;
+  let clean = text;
+ 
+  if (tagMatch) {
+    clean = text.replace(/<memory_update>[\s\S]*?<\/memory_update>/gi, '').trim();
+    try { update = JSON.parse(tagMatch[1]); } catch {}
+  } else if (jsonMatch) {
+    clean = text.replace(/memory_update\s*\{[\s\S]*?\}/gi, '').trim();
+    try { update = JSON.parse(jsonMatch[1]); } catch {}
   }
+ 
+  return { clean, update };
 }
  
 export async function getAsmiReply(userId, username, userMessage) {
@@ -51,7 +57,6 @@ export async function getAsmiReply(userId, username, userMessage) {
     const errBody = JSON.stringify(err?.error ?? '');
  
     if (err?.status === 429 || errMsg.includes('rate_limit') || errBody.includes('rate_limit')) {
-      // Extract reset time from error message if available
       const timeMatch = (errMsg + errBody).match(/try again in ([\d.]+[a-z]+)/i);
       const resetTime = timeMatch ? timeMatch[1] : 'a little while';
       return `okay so... I've hit my daily limit and need a little breather 😮‍💨 I'll be back in about **${resetTime}**! don't go anywhere hehe :>`;
@@ -73,3 +78,4 @@ export async function getAsmiReply(userId, username, userMessage) {
  
   return reply;
 }
+ 
